@@ -1,6 +1,6 @@
-import cv2
 import numpy as np
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
+import cv2
 from time import time
 from itertools import combinations
 from skimage.draw import line
@@ -24,8 +24,8 @@ class mBEST:
 
         self.colors = colors
         if colors is None:
-            self.colors = [[0, 255, 0], [0, 0, 255], [255, 0, 0],
-                           [0, 255, 255], [255, 255, 0], [255, 0, 255]]
+            self.colors = (np.array([[0, 255, 0], [0, 0, 255], [255, 0, 0],
+                           [0, 255, 255], [255, 255, 0], [255, 0, 255]])*0.8).astype(np.uint8).tolist()
 
     def set_image(self, image, blur_size=5):
         self.image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -252,8 +252,8 @@ class mBEST:
             p2 = paths_to_ends[id21]
 
             # Using blurred image is key to getting rid of influence from glare
-            std1 = self.blurred_image[p1[:, 0], p1[:, 1]].std(axis=0).sum()
-            std2 = self.blurred_image[p2[:, 0], p2[:, 1]].std(axis=0).sum()
+            std1 = self.blurred_image[p1].std(axis=0).sum()
+            std2 = self.blurred_image[p2].std(axis=0).sum()
 
             if std1 > std2:
                 crossing_orders[id11] = 0
@@ -349,87 +349,57 @@ class mBEST:
                 cv2.circle(path_img, (y, x), path_radii[x, y], self.colors[i], -1)
 
         # Handle intersections with appropriate crossing order
+        # 1==over, 0==under
         for id, path_id in intersection_path_id.items():
             if id not in crossing_orders or crossing_orders[id] == 1: continue
             color = self.colors[path_id]
             for x, y in intersection_paths[id]:
-                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], color, -1)
+                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], (color), -1)
         for id, path_id in intersection_path_id.items():
             if id not in crossing_orders or crossing_orders[id] == 0: continue
             color = self.colors[path_id] if intersection_color is None else intersection_color
             for x, y in intersection_paths[id]:
-                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], color, -1)
+                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], np.clip(np.array(color)*1.25,0,255), -1)
 
         return path_img
 
     def run(self, orig_mask, intersection_color=None, plot=False, save_fig=False, save_id=0):
         if self.image is None:
             raise RuntimeError("Add image to mBEST using set_image function.")
-        times = []
 
         # Create the skeleton pixels.
-        s = time()
         img = np.zeros((orig_mask.shape[0]+2, orig_mask.shape[1]+2), dtype=np.uint8)
         img[1:-1, 1:-1] = orig_mask
         mask = img == 0
         img[mask] = 0
         img[~mask] = 1
         skeleton = sk.skeletonize(img)
-        times.append(time() - s)
-        print("Skeletonizing time: {:.5f}".format(times[-1]))
 
         # Keypoint Detection
-        s = time()
         ends, intersections = self._detect_keypoints(skeleton)
-        times.append(time() - s)
-        print("Keypoint detection time: {:.5f}".format(times[-1]))
 
         # Prune noisy split ends.
-        s = time()
         ends, intersections = self._prune_split_ends(skeleton, ends, intersections)
-        times.append(time() - s)
-        print("Prune time: {:.5f}".format(times[-1]))
 
         intersection_paths = {}
         crossing_orders = {}
         if len(intersections > 0):
-            s = time()
             intersections = self._cluster_intersections(intersections)
-            times.append(time() - s)
-            print("Intersection cluster time: {:.5f}".format(times[-1]))
 
-            s = time()
             intersection_paths, crossing_orders = self._generate_intersection_paths(skeleton, intersections)
-            times.append(time() - s)
-            print("Replace intersections time: {:.5f}".format(times[-1]))
 
-        s = time()
         paths, intersection_path_id = self._generate_paths(skeleton, ends, intersection_paths)
-        times.append(time() - s)
-        print("Path generation time: {:.5f}".format(times[-1]))
+
 
         if plot:
-            s = time()
             path_radii = self._compute_radii(orig_mask, paths)
-            times.append(time() - s)
-            print("Computing radii time: {:.5f}".format(times[-1]))
-
-            s = time()
             path_img = self._plot_paths(paths, intersection_paths, intersection_path_id,
                                         crossing_orders, path_radii, intersection_color)
-            times.append(time() - s)
-            print("Plotting time: {:.5f}".format(times[-1]))
-
-        print("Total time: {:.5f}".format(sum(times)))
-
-        if plot:
-            fig, ax = plt.subplots(1, 2)
-            ax[0].imshow(self.image)
-            ax[1].imshow(path_img)
-            plt.tight_layout()
-            if save_fig:
-                plt.savefig("img{}.png".format(save_id), dpi=300)
-            else:
-                plt.show()
+            dual = np.zeros(self.image.shape * np.array([1,2,1]),dtype=np.uint8)
+            dual[:,:self.image.shape[1],:] = self.image
+            dual[:,self.image.shape[1]:,:] = path_img
+            dual = cv2.cvtColor(dual,cv2.COLOR_RGB2BGR)
+            cv2.imshow("mask",dual)
+            cv2.waitKey(0)
 
         return paths
