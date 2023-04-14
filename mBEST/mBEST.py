@@ -10,7 +10,8 @@ import mBEST.skeletonize as sk
 
 
 class mBEST:
-    def __init__(self, epsilon=40, delta=25, colors=None):
+    def __init__(self, seg_func, epsilon=40, delta=25, colors=None):
+        self.seg_func = seg_func
         self.epsilon = epsilon
         self.delta = delta
 
@@ -19,30 +20,32 @@ class mBEST:
         self.intersection_clusterer = DBSCAN(eps=self.epsilon, min_samples=1)
         self.adjacent_pixel_clusterer = DBSCAN(eps=3, min_samples=1)
 
-        self.image = None
-        self.blurred_image = None
-
         self.colors = colors
         if colors is None:
-            self.colors = (np.array([[0, 255, 0], [0, 0, 255], [255, 0, 0],
-                           [0, 255, 255], [255, 255, 0], [255, 0, 255]])*0.8).astype(np.uint8).tolist()
+            self.colors = np.array(
+                [
+                    [0, 255, 0], 
+                    [0, 0, 255], 
+                    [255, 0, 0],
+                    [0, 255, 255], 
+                    [255, 255, 0], 
+                    [255, 0, 255]
+                ],
+                np.uint8
+            ).tolist()
 
-    def set_image(self, image, blur_size=5):
-        self.image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        self.blurred_image = cv2.blur(self.image, (blur_size, blur_size))
-
-    def _detect_keypoints(self, skeleton):
-        padded_img = np.zeros((skeleton.shape[0]+2, skeleton.shape[1]+2), dtype=np.uint8)
-        padded_img[1:-1, 1:-1] = skeleton
-        res = cv2.filter2D(src=padded_img, ddepth=-1, kernel=self.end_point_kernel)
+    def _detect_keypoints(self, skeleton_img):
+        padded_img = np.zeros((skeleton_img.shape[0]+2, skeleton_img.shape[1]+2), dtype=np.uint8)
+        padded_img[1:-1, 1:-1] = skeleton_img
+        res = cv2.filter2D(src=padded_img.astype(np.uint8), ddepth=-1, kernel=self.end_point_kernel)
         ends = np.argwhere(res == 11) - 1
         intersections = np.argwhere(res > 12) - 1
         return ends, intersections
 
     def _prune_split_ends(self, skeleton, ends, intersections):
         my_skeleton = skeleton.copy()
-        inter_indices = [True for _ in intersections]
-        inter_index_dict = {"{},{}".format(x, y): i for i, (x, y) in enumerate(intersections)}
+        inter_indices = [True]*len(intersections)#[True for _ in intersections]
+        inter_index_dict = {"{},{}".format(row, col): i for i, (row, col) in enumerate(intersections)}
         valid_ends = []
         ends = list(ends)  # so that we can append new ends
 
@@ -52,20 +55,17 @@ class mBEST:
             prune = False
             found_nothing = False
 
+            
             while True:
-                x, y = curr_pixel
-                my_skeleton[curr_pixel[0], curr_pixel[1]] = 0
-                c_x, c_y = np.where(my_skeleton[x-1:x+2, y-1:y+2])
-                c_x += x-1
-                c_y += y-1
-
-                num_neighbors = len(c_x)
+                row,col = curr_pixel
+                my_skeleton[row, col] = 0
+                neighbors = np.argwhere(my_skeleton[row-1:row+2,col-1:col+2])
                 # Keep following segment
-                if num_neighbors == 1:
-                    curr_pixel = [c_x[0], c_y[0]]
+                if neighbors.shape[0] == 1:
+                    curr_pixel += neighbors.flatten()-1
                     path.append(curr_pixel)
                 # We've reached an end
-                elif num_neighbors == 0:
+                elif neighbors.shape[0] == 0:
                     found_nothing = True
                     break
                 # Found an intersection
@@ -87,32 +87,33 @@ class mBEST:
                 if len(path) > self.delta:
                     break
 
-            if found_nothing: continue
+            if found_nothing: 
+                continue
             path = np.asarray(path)
 
             # Prune noisy segment from skeleton.
             if prune:
-                skeleton[path[:, 0], path[:, 1]] = 0
-                x, y = path[-1]
-                skeleton[x-2:x+3, y-2:y+3] = 0
-                vecs = ut.get_boundary_pixels(skeleton[x-4:x+5, y-4:y+5])
+                skeleton[path] = 0
+                row, col = path[-1]
+                skeleton[row-2:row+3, col-2:col+3] = 0
+                vecs = ut.get_boundary_pixels(skeleton[row-4:row+5, col-4:col+5])
 
                 # Reconnect the segments together after pruning a branch
                 if len(vecs) == 2:
-                    vecs[:, 0] += x - 3
-                    vecs[:, 1] += y - 3
+                    vecs[:, 0] += row - 3
+                    vecs[:, 1] += col - 3
                     reconnected_line = line(vecs[0][0], vecs[0][1], vecs[1][0], vecs[1][1])
                     skeleton[reconnected_line[0], reconnected_line[1]] = 1
 
                 # We created a new end so add it.
                 elif len(vecs) == 1:
                     vecs = vecs.squeeze()
-                    vecs[0] += x - 3
-                    vecs[1] += y - 3
+                    vecs[0] += row - 3
+                    vecs[1] += col - 3
                     ends.append(vecs)
 
                 # Reflect the changes on our skeleton copy.
-                my_skeleton[x-2:x+3, y-2:y+3] = skeleton[x-2:x+3, y-2:y+3]
+                my_skeleton[row-2:row+3, col-2:col+3] = skeleton[row-2:row+3, col-2:col+3]
 
             else:
                 valid_ends.append(i)
@@ -147,7 +148,6 @@ class mBEST:
     def _compute_minimal_bending_energy_paths(ends, inter):
         indices = [i for i in range(len(ends))]
         all_pairs = list(combinations(indices, 2))
-        best_paths = {}
 
         # This should preferably be the case for every intersection, but could not be because of noise.
         if len(ends) == 4:
@@ -170,10 +170,10 @@ class mBEST:
 
                 if total_curvature < minimum_total_curvature:
                     minimum_total_curvature = total_curvature
-                    best_paths[a1] = a2
-                    best_paths[a2] = a1
-                    best_paths[b1] = b2
-                    best_paths[b2] = b1
+                    indices[a1] = a2
+                    indices[a2] = a1
+                    indices[b1] = b2
+                    indices[b2] = b1
 
         elif len(ends) == 3:
             minimum_curvature = np.inf
@@ -183,19 +183,19 @@ class mBEST:
 
                 if curvature < minimum_curvature:
                     minimum_curvature = curvature
-                    best_paths[v1] = v2
-                    best_paths[v2] = v1
+                    indices[v1] = v2
+                    indices[v2] = v1
 
                     # Make the last path end here
                     third_path = total - (v1 + v2)
-                    best_paths[third_path] = None
+                    indices[third_path] = None
 
         else:
             return False
 
-        return best_paths
+        return indices
 
-    def _generate_intersection_paths(self, skeleton, intersections):
+    def _generate_intersection_paths(self, skeleton, intersections,image):
         paths_to_ends = {}
         crossing_orders = {}
 
@@ -219,41 +219,42 @@ class mBEST:
 
             generated_paths = [list(np.asarray(line(e[0], e[1], inter[0], inter[1])).T[:-1]) for e in ends]
 
-            for i, (x1, y1) in enumerate(ends):
+            for i, (row1, col1) in enumerate(ends):
                 if best_paths[i] is None:
                     three_way = True
                     continue
-                x2, y2 = ends[best_paths[i]]
+                row2, col2 = ends[best_paths[i]]
                 # Construct a path that minimizes the total bending energy of the intersection.
                 if i < best_paths[i]:
-                    constructed_path = generated_paths[i] + [inter] + generated_paths[best_paths[i]][::-1] + [[x2, y2]]
+                    constructed_path = generated_paths[i] + [inter] + generated_paths[best_paths[i]][::-1] + [[row2, col2]]
                     constructed_path = np.asarray(constructed_path, dtype=np.int16)
                 # If we already constructed the reverse path, just flip and reuse.
                 else:
-                    constructed_path = np.flip(paths_to_ends["{},{}".format(x2, y2)], axis=0)
+                    constructed_path = np.flip(paths_to_ends["{},{}".format(row2, col2)], axis=0)
                     constructed_path[:-1] = constructed_path[1:]
-                    constructed_path[-1] = [x2, y2]
-                paths_to_ends["{},{}".format(x1, y1)] = constructed_path
+                    constructed_path[-1] = [row2, col2]
+                paths_to_ends["{},{}".format(row1, col1)] = constructed_path
 
             if three_way: continue
 
             # Determine crossing order
             possible_paths = [1, 2, 3]
             possible_paths.remove(best_paths[0])
-            x11, y11 = ends[0]
-            x12, y12 = ends[best_paths[0]]
-            x21, y21 = ends[possible_paths[0]]
-            x22, y22 = ends[possible_paths[1]]
-            id11 = "{},{}".format(x11, y11)
-            id12 = "{},{}".format(x12, y12)
-            id21 = "{},{}".format(x21, y21)
-            id22 = "{},{}".format(x22, y22)
+            row11, col11 = ends[0]
+            row12, col12 = ends[best_paths[0]]
+            row21, col21 = ends[possible_paths[0]]
+            row22, col22 = ends[possible_paths[1]]
+            id11 = "{},{}".format(row11, col11)
+            id12 = "{},{}".format(row12, col12)
+            id21 = "{},{}".format(row21, col21)
+            id22 = "{},{}".format(row22, col22)
             p1 = paths_to_ends[id11]
             p2 = paths_to_ends[id21]
 
             # Using blurred image is key to getting rid of influence from glare
-            std1 = self.blurred_image[p1].std(axis=0).sum()
-            std2 = self.blurred_image[p2].std(axis=0).sum()
+            blurred_image = cv2.blur(image, (5, 5))
+            std1 = blurred_image[p1].std(axis=0).sum()
+            std2 = blurred_image[p2].std(axis=0).sum()
 
             if std1 > std2:
                 crossing_orders[id11] = 0
@@ -315,15 +316,15 @@ class mBEST:
         path_radii_avgs = [int(np.round(dist_img[path[:, 0], path[:, 1]].mean())) for path in paths]
         return path_radii, path_radii_avgs
 
-    def _plot_paths(self, paths, intersection_paths, intersection_path_id,
+    def _plot_paths(self, image, paths, intersection_paths, intersection_path_id,
                     crossing_orders, path_radii_data, intersection_color=None):
-        path_img = np.zeros_like(self.image)
+        path_img = np.zeros_like(image)
 
         path_radii, path_radii_avgs = path_radii_data
         
         end_lengths = self.epsilon
         end_buffer = 10 if end_lengths > 10 else int(end_lengths * 0.5)
-        img_height, img_width = self.image.shape[1], self.image.shape[0]
+        img_height, img_width = image.shape[1], image.shape[0]
         left_limit = end_lengths
         right_limit = img_width - int(end_lengths * 0.5)
         bottom_limit = end_lengths
@@ -331,41 +332,42 @@ class mBEST:
 
         # Generate segmentation along the DLO path(s)
         for i, path in enumerate(paths):
-            for x, y in path[:end_buffer]:
-                cv2.circle(path_img, (y, x), path_radii[x, y], self.colors[i], -1)
-            for x, y in path[end_buffer:end_lengths]:
-                if x < left_limit or x > right_limit or y < bottom_limit or y > top_limit:
-                    cv2.circle(path_img, (y, x), path_radii[x, y], self.colors[i], -1)
+            for row,col in path[:end_buffer]:
+                cv2.circle(path_img, (col,row), path_radii[row,col], self.colors[i], -1)
+            for row,col in path[end_buffer:end_lengths]:
+                if col < left_limit or col > right_limit or row < bottom_limit or row > top_limit:
+                    cv2.circle(path_img, (col,row), path_radii[row,col], self.colors[i], -1)
                 else:
-                    cv2.circle(path_img, (y, x), path_radii_avgs[i], self.colors[i], -1)
-            for x, y in path[end_lengths:-end_lengths]:
-                cv2.circle(path_img, (y, x), path_radii_avgs[i], self.colors[i], -1)
-            for x, y in path[-end_lengths:-end_buffer]:
-                if x < left_limit or x > right_limit or y < bottom_limit or y > top_limit:
-                    cv2.circle(path_img, (y, x), path_radii[x, y], self.colors[i], -1)
+                    cv2.circle(path_img, (col,row), path_radii_avgs[i], self.colors[i], -1)
+            for row,col in path[end_lengths:-end_lengths]:
+                cv2.circle(path_img, (col,row), path_radii_avgs[i], self.colors[i], -1)
+            for row,col in path[-end_lengths:-end_buffer]:
+                if col < left_limit or col > right_limit or row < bottom_limit or row > top_limit:
+                    cv2.circle(path_img, (col,row), path_radii[row,col], self.colors[i], -1)
                 else:
-                    cv2.circle(path_img, (y, x), path_radii_avgs[i], self.colors[i], -1)
-            for x, y in path[-end_buffer:]:
-                cv2.circle(path_img, (y, x), path_radii[x, y], self.colors[i], -1)
+                    cv2.circle(path_img, (col,row), path_radii_avgs[i], self.colors[i], -1)
+            for row,col in path[-end_buffer:]:
+                cv2.circle(path_img, (col,row), path_radii[row,col], self.colors[i], -1)
 
         # Handle intersections with appropriate crossing order
         # 1==over, 0==under
         for id, path_id in intersection_path_id.items():
             if id not in crossing_orders or crossing_orders[id] == 1: continue
             color = self.colors[path_id]
-            for x, y in intersection_paths[id]:
-                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], (color), -1)
+            for row,col in intersection_paths[id]:
+                cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], (color), -1)
         for id, path_id in intersection_path_id.items():
             if id not in crossing_orders or crossing_orders[id] == 0: continue
             color = self.colors[path_id] if intersection_color is None else intersection_color
-            for x, y in intersection_paths[id]:
-                cv2.circle(path_img, (y-1, x-1), path_radii_avgs[path_id], np.clip(np.array(color)*1.25,0,255), -1)
+            for row,col in intersection_paths[id]:
+                cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], color, -1)
 
         return path_img
 
-    def run(self, orig_mask, intersection_color=None, plot=False, save_fig=False, save_id=0):
-        if self.image is None:
-            raise RuntimeError("Add image to mBEST using set_image function.")
+    def run(self, image, intersection_color=None, plot=False, save_fig=False, save_id=0):
+
+        # Create the mask
+        orig_mask = self.seg_func(image)
 
         # Create the skeleton pixels.
         img = np.zeros((orig_mask.shape[0]+2, orig_mask.shape[1]+2), dtype=np.uint8)
@@ -386,19 +388,20 @@ class mBEST:
         if len(intersections > 0):
             intersections = self._cluster_intersections(intersections)
 
-            intersection_paths, crossing_orders = self._generate_intersection_paths(skeleton, intersections)
+            intersection_paths, crossing_orders = self._generate_intersection_paths(skeleton, intersections,image)
 
         paths, intersection_path_id = self._generate_paths(skeleton, ends, intersection_paths)
 
 
         if plot:
             path_radii = self._compute_radii(orig_mask, paths)
-            path_img = self._plot_paths(paths, intersection_paths, intersection_path_id,
+            path_img = self._plot_paths(image,paths, intersection_paths, intersection_path_id,
                                         crossing_orders, path_radii, intersection_color)
-            dual = np.zeros(self.image.shape * np.array([1,2,1]),dtype=np.uint8)
-            dual[:,:self.image.shape[1],:] = self.image
-            dual[:,self.image.shape[1]:,:] = path_img
-            dual = cv2.cvtColor(dual,cv2.COLOR_RGB2BGR)
+            # dual = np.zeros(image.shape * np.array([1,2,1]),dtype=np.uint8)
+            # dual[:,:image.shape[1],:] = image
+            # dual[:,image.shape[1]:,:] = path_img
+            dual = np.hstack([image,path_img])
+            # dual = cv2.cvtColor(dual,cv2.COLOR_RGB2BGR)
             cv2.imshow("mask",dual)
             cv2.waitKey(0)
 
