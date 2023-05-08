@@ -1,7 +1,8 @@
-from setuptools import setup
-from Cython.Build import cythonize
+from setuptools import setup, find_packages
 
 setup(
-    ext_modules = cythonize("mBEST/skeletonize/skeletonize.pyx")
+    name="mBEST",
+    description="DLO segmenting package",
+    packages=find_packages()
 )
 

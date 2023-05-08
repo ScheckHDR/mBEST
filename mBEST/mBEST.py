@@ -50,7 +50,7 @@ class mBEST:
         ends = list(ends)  # so that we can append new ends
 
         for i, e in enumerate(ends):
-            curr_pixel = e
+            curr_pixel = e.copy()
             path = [curr_pixel]
             prune = False
             found_nothing = False
@@ -226,13 +226,13 @@ class mBEST:
                 row2, col2 = ends[best_paths[i]]
                 # Construct a path that minimizes the total bending energy of the intersection.
                 if i < best_paths[i]:
-                    constructed_path = generated_paths[i] + [inter] + generated_paths[best_paths[i]][::-1] + [[row2, col2]]
+                    constructed_path = generated_paths[i] + [inter] + generated_paths[best_paths[i]][::-1]# + [[row2, col2]]
                     constructed_path = np.asarray(constructed_path, dtype=np.int16)
                 # If we already constructed the reverse path, just flip and reuse.
                 else:
                     constructed_path = np.flip(paths_to_ends["{},{}".format(row2, col2)], axis=0)
-                    constructed_path[:-1] = constructed_path[1:]
-                    constructed_path[-1] = [row2, col2]
+                    # constructed_path[:-1] = constructed_path[1:]
+                    # constructed_path[-1] = [row2, col2]
                 paths_to_ends["{},{}".format(row1, col1)] = constructed_path
 
             if three_way: continue
@@ -279,28 +279,30 @@ class mBEST:
         while len(ends) != 0:
             curr_pixel = ends.pop()
             done = False
-            path = []
+            path = [curr_pixel]
 
             visited = set()
 
             while not done:
-                path += list(ut.traverse_skeleton(skeleton, curr_pixel))
+                path += list(ut.traverse_skeleton(skeleton, curr_pixel))[1:]
                 p_x, p_y = path[-1]
                 id = "{},{}".format(p_x, p_y)
 
                 # We found an intersection, let's add our precomputed path to it.
                 if id in intersection_paths:
                     if id in visited:  # found a cycle
-                        paths.append(np.asarray(path) - 1)  # -1 for offset
+                        # paths.append(np.asarray(path) - 1)  # -1 for offset
+                        paths.append(np.asarray(path[1:]))  # -1 for offset
                         break
                     visited.add(id)
-                    path += list(intersection_paths[id])
+                    path += list(intersection_paths[id][1:,:])
                     curr_pixel = np.array([path[-1][0], path[-1][1]], dtype=np.int16)
                     intersection_path_id[id] = path_id
                     continue
                 # We've finished this path.
                 else:
-                    paths.append(np.asarray(path)-1)  # -1 for offset
+                    # paths.append(np.asarray(path)-1)  # -1 for offset
+                    paths.append(np.asarray(path))  # -1 for offset
                     # Remove the end so that we don't traverse again in opposite direction.
                     ut.remove_from_array(ends, path[-1])
                     break
@@ -316,8 +318,7 @@ class mBEST:
         path_radii_avgs = [int(np.round(dist_img[path[:, 0], path[:, 1]].mean())) for path in paths]
         return path_radii, path_radii_avgs
 
-    def _plot_paths(self, image, paths, intersection_paths, intersection_path_id,
-                    crossing_orders, path_radii_data, intersection_color=None):
+    def _plot_paths(self, image, paths, is_over, path_radii_data, intersection_color=None):
         path_img = np.zeros_like(image)
 
         path_radii, path_radii_avgs = path_radii_data
@@ -349,20 +350,48 @@ class mBEST:
             for row,col in path[-end_buffer:]:
                 cv2.circle(path_img, (col,row), path_radii[row,col], self.colors[i], -1)
 
+            for row,col in path[is_over[i],:]:
+                color = self.colors[i] if intersection_color is None else intersection_color
+                cv2.circle(path_img, (col-1, row-1), path_radii_avgs[i], color, -1)
+
+
         # Handle intersections with appropriate crossing order
         # 1==over, 0==under
-        for id, path_id in intersection_path_id.items():
-            if id not in crossing_orders or crossing_orders[id] == 1: continue
-            color = self.colors[path_id]
-            for row,col in intersection_paths[id]:
-                cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], (color), -1)
-        for id, path_id in intersection_path_id.items():
-            if id not in crossing_orders or crossing_orders[id] == 0: continue
-            color = self.colors[path_id] if intersection_color is None else intersection_color
-            for row,col in intersection_paths[id]:
-                cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], color, -1)
+        # for id, path_id in intersection_path_id.items():
+        #     if id not in crossing_orders or crossing_orders[id] == 1: continue
+        #     color = self.colors[path_id]
+        #     for row,col in intersection_paths[id]:
+        #         cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], (color), -1)
+        # for id, path_id in intersection_path_id.items():
+        #     if id not in crossing_orders or crossing_orders[id] == 0: continue
+        #     color = self.colors[path_id] if intersection_color is None else intersection_color
+        #     for row,col in intersection_paths[id]:
+        #         cv2.circle(path_img, (col-1, row-1), path_radii_avgs[path_id], color, -1)
+
 
         return path_img
+
+    def compute3d(self,paths,inter_paths,inter_path_id,crossing_orders):
+        inter_paths_list = []
+        _inter_paths = inter_paths.copy()
+        for i in range(len(paths)):
+            new_dict = {key : _inter_paths[key] for key in _inter_paths if inter_path_id.get(key,-1) == i and crossing_orders.get(key,False)}
+            # for key in new_dict:
+            #     del _inter_paths[key]
+            inter_paths_list.append(new_dict)
+
+        overs = []
+        for i in range(len(paths)):
+            over = np.zeros(paths[i].shape[0],dtype=bool)
+            for key,value in inter_paths_list[i].items():
+                idx_start = np.nonzero(np.all(paths[i] == value[0,:],axis=1))[0][0]
+                # indices = np.argwhere((paths[i][:,None,[0,1]] == value[:,[0,1]]).all(-1))[:,0]
+                over[idx_start:idx_start+value.shape[0]] = True
+            overs.append(over)
+        return overs
+
+
+
 
     def run(self, image, intersection_color=None, plot=False, save_fig=False, save_id=0):
 
@@ -392,17 +421,21 @@ class mBEST:
 
         paths, intersection_path_id = self._generate_paths(skeleton, ends, intersection_paths)
 
+        is_over = self.compute3d(paths,intersection_paths,intersection_path_id,crossing_orders)
 
-        if plot:
+        if plot > -1:
             path_radii = self._compute_radii(orig_mask, paths)
-            path_img = self._plot_paths(image,paths, intersection_paths, intersection_path_id,
-                                        crossing_orders, path_radii, intersection_color)
+            path_img = self._plot_paths(image,paths, is_over, path_radii, intersection_color)
             # dual = np.zeros(image.shape * np.array([1,2,1]),dtype=np.uint8)
             # dual[:,:image.shape[1],:] = image
             # dual[:,image.shape[1]:,:] = path_img
             dual = np.hstack([image,path_img])
             # dual = cv2.cvtColor(dual,cv2.COLOR_RGB2BGR)
-            cv2.imshow("mask",dual)
-            cv2.waitKey(0)
+            cv2.imshow("results",dual)
+            cv2.waitKey(plot)
 
-        return paths
+        paths3d = []
+        for path,over in zip(paths,is_over):
+            # adding 3rd dimension and also flipping first two dims so they are pixel coords not matrix coords.
+            paths3d.append(np.insert(path[:,::-1],2,over.astype(np.uint32),axis=1).T) 
+        return paths3d
